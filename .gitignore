@@ -1,0 +1,31 @@
+# Données sensibles - ne pas pousser sur GitHub
+config.json
+TOOL_import_session_*.json
+
+# Fichiers d'état et données personnelles
+calendar_state.json
+calendar_state.json.bak
+stats_history.json
+stats_history.json.bak
+daily_reminder_sent.json
+events_log.json
+pending_removals.json
+pending_suppressions.json
+objectifs.json
+analysis.json
+calendar_agent.lock
+stats.lock
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Fichiers divers
+conetnu mail.txt
+float
+str
+2

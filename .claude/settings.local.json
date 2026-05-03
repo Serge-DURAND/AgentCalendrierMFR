@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(py -c \":*)",
+      "Bash(python -c \"import statistiques_v15\")",
+      "Bash(python -c \"import statistiques_v15; print\\(''OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''statistiques_v16.py''\\).read\\(\\)\\); print\\(''OK syntaxe''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''statistiques_v16.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(ls -la *.json)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''statistiques_v17.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''OK syntaxe''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''statistiques_v17.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(python:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(\"C:\\\\Users\\\\formateur 15\\\\Anaconda3\\\\python.exe\" /tmp/test_smtp.py)",
+      "Bash(python3 -c ':*)",
+      "Bash(C:\\\\Users\\\\formateur 15\\\\Anaconda3\\\\python.exe:*)",
+      "Bash(\"C:\\\\Users\\\\formateur 15\\\\Anaconda3\\\\python.exe\" -m py_compile \"C:\\\\Users\\\\formateur 15\\\\AgentCalendrierMFR\\\\calendar_agent_console_v6_0.py\")",
+      "Bash(\"C:\\\\Users\\\\formateur 15\\\\Anaconda3\\\\python.exe\" -m py_compile \"C:\\\\Users\\\\formateur 15\\\\AgentCalendrierMFR\\\\calendar_agent_console_v6_0_1.py\")",
+      "Bash(python3:*)",
+      "Bash(py:*)",
+      "Bash(ls C:\\\\Users\\\\formateur 15\\\\AgentCalendrierMFR\\\\statistiques*:*)",
+      "Bash(git --version)",
+      "Bash(gh --version)",
+      "Bash(git *)",
+      "Bash(Get-ChildItem C:\\\\Users\\\\formateur 15\\\\AgentCalendrierMFR *)"
+    ]
+  }
+}
