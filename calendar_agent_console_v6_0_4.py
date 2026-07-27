@@ -130,6 +130,17 @@
 #         - send_email() retourne True/False selon succès ou échec
 #         - Si le mail échoue, l'état du calendrier n'est PAS mis à jour :
 #           les changements seront inclus dans le prochain mail réussi
+#
+# v6.2  : Correction de deux bugs de lock file causant des doublons d'instances
+#         - Bug 1 : os.kill(pid, 0) n'est pas un test d'existence fiable sous
+#           Windows (lève une exception même si le processus est vivant) → la
+#           vérification de collision échouait systématiquement et une 2e
+#           instance démarrait. Nouvelle fonction _pid_is_running() :
+#           OpenProcess() sous Windows, os.kill(pid, 0) conservé sous POSIX
+#         - Bug 2 : le processus perdant la collision supprimait quand même
+#           le lock file de l'instance légitime en quittant (atexit.register
+#           inconditionnel dès l'import). remove_lock() vérifie maintenant
+#           que le PID dans le lock file est bien le sien avant de le supprimer
 # =====================================================================
 
 import os
@@ -153,7 +164,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from icalendar import Calendar
 
-VERSION = "6.0.4"
+VERSION = "6.2"
 
 JOURS = ["Lun.", "Mar.", "Mer.", "Jeu.", "Ven.", "Sam.", "Dim."]
 
@@ -202,21 +213,39 @@ logging.basicConfig(
 )
 
 # --- Gestion du lock file ---
+def _pid_is_running(pid: int) -> bool:
+    """Vérifie si un PID correspond à un processus vivant.
+
+    Sous Windows, os.kill(pid, 0) n'est PAS un simple test d'existence comme sous
+    POSIX : le signal 0 est interprété comme CTRL_C_EVENT et lève une exception
+    même si le processus cible est bien vivant (il n'est pas dans le même groupe
+    de console). Ça faisait croire à tort que l'ancienne instance était morte et
+    provoquait le démarrage d'une deuxième instance en parallèle."""
+    if os.name == "nt":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
 def create_lock() -> None:
     if os.path.exists(LOCK_FILE):
         pid = None
         try:
             with open(LOCK_FILE, "r") as f:
                 pid = int(f.read().strip())
-            os.kill(pid, 0)
-            # os.kill(pid, 0) a réussi → processus toujours vivant → vraie collision
+        except ValueError:
+            pid = None
+        if pid is not None and _pid_is_running(pid):
             logging.error("Une instance est déjà en cours !")
             sys.exit(1)
-        except OSError:
-            # ProcessLookupError : PID inexistant → lock fantôme (crash précédent)
-            pass
-        except ValueError:
-            pass
         logging.warning(
             f"Lock file fantôme détecté (PID {pid}), "
             "le processus précédent s'est terminé anormalement. Démarrage..."
@@ -226,7 +255,21 @@ def create_lock() -> None:
         f.write(str(os.getpid()))
 
 def remove_lock() -> None:
+    """Supprime le lock file, mais seulement s'il nous appartient.
+
+    atexit.register(remove_lock) est enregistré dès l'import du module, donc
+    cette fonction s'exécute aussi pour un processus qui vient de perdre la
+    collision dans create_lock() (sys.exit(1) déclenche les handlers atexit).
+    Sans cette vérification de PID, ce processus perdant supprimait le lock
+    file de l'instance légitime qui tourne toujours."""
     if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, "r") as f:
+                pid = int(f.read().strip())
+            if pid != os.getpid():
+                return
+        except (ValueError, OSError):
+            pass
         os.remove(LOCK_FILE)
         logging.info("Lock file supprimé proprement.")
 
