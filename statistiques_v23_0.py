@@ -982,7 +982,7 @@ def _load_data(state: Dict) -> Dict:
 def _load_and_show(state: Dict, section: int) -> Dict:
     state = _load_data(state)
 
-    for cn, by_year in all_analysis.items():
+    for cn, by_year in _last_analysis.items():
         logging.info("")
         logging.info(_green(SEP))
         logging.info(_green(f"  CALENDRIER : {cn}"))
