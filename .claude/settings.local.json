@@ -23,7 +23,26 @@
       "Bash(git --version)",
       "Bash(gh --version)",
       "Bash(git *)",
-      "Bash(Get-ChildItem C:\\\\Users\\\\formateur 15\\\\AgentCalendrierMFR *)"
+      "Bash(Get-ChildItem C:\\\\Users\\\\formateur 15\\\\AgentCalendrierMFR *)",
+      "Bash(tasklist *)",
+      "Bash(kill 48804)",
+      "PowerShell(\\(Get-Command python -ErrorAction SilentlyContinue\\).Source; \\(Get-Command py -ErrorAction SilentlyContinue\\).Source; python --version; [Environment]::GetFolderPath\\('Startup'\\))",
+      "PowerShell(Get-CimInstance *)",
+      "PowerShell(Stop-Process *)",
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Id 58424 -Confirm:\\\\$false\" 2>&1)",
+      "PowerShell(powershell.exe -Command \"goCalendrier; Get-Location\")",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(python -c \"import json; json.load\\(open\\('config.json', encoding='utf-8'\\)\\); print\\('OK'\\)\")",
+      "PowerShell(Get-Process *)",
+      "PowerShell(& \"C:\\\\Users\\\\utilisateur\\\\miniconda3\\\\python.exe\" \"_pid_test.py\")",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(& \"C:\\\\Users\\\\utilisateur\\\\miniconda3\\\\python.exe\" \"_check_classes.py\")",
+      "PowerShell(& \"C:\\\\Users\\\\utilisateur\\\\miniconda3\\\\python.exe\" *)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Test-Path *)",
+      "PowerShell(ConvertFrom-Json *)",
+      "PowerShell(Write-Output *)",
+      "PowerShell(Start-Process *)"
     ]
   }
 }
