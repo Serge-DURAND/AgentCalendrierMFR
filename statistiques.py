@@ -55,6 +55,17 @@
 #          - Alerte jaune "alerte"  si 100% ≤ charge ≤ 120%
 #          - Alerte rouge "ALERTE"  si charge ≥ 121%
 #          - L'ancienne option 8 "Changer d'année scolaire" devient option 9
+#
+# v24.0 : Introduction d'une variable VERSION (absente jusqu'ici — le numéro
+#          dans le nom de fichier, ex. v23_0/v24_0, ne correspondait à rien
+#          en interne et ne suivait pas ce changelog). Renommage du fichier
+#          (anciennement statistiques_v24_0.py) : le nom reste désormais
+#          stable, seule VERSION porte le numéro de version.
+#          Correction dédoublement (menus 1-4, analyze_events()) : le
+#          coefficient 0,5 en vue Élèves n'est plus appliqué à une séance
+#          "Dédoublement" isolée (sans vrai second groupe la même semaine
+#          lundi-dimanche) — elle compte alors à poids plein comme un cours
+#          normal. Le menu 9 donnait déjà ce résultat de façon incidente.
 # =====================================================================
 
 import os
@@ -107,6 +118,8 @@ import pytz
 import psutil
 from typing import Dict, List, Tuple, Optional
 from icalendar import Calendar
+
+VERSION = "24.0"
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -442,6 +455,12 @@ def analyze_events(events: Dict, today: datetime.date) -> Dict:
     # Pré-passe : détection des regroupements
     # Un créneau est "regroupé" si plusieurs classes ont le même cours au même moment
     slot_classes: Dict = {}
+    # Pré-passe : détection des vrais dédoublements — une classe/matière n'est
+    # considérée réellement dédoublée une semaine donnée (lundi-dimanche) que si
+    # au moins 2 séances "Dédoublement" y sont recensées (les 2 demi-groupes).
+    # Une séance isolée (l'autre demi-groupe n'a pas eu lieu cette semaine-là)
+    # n'est pas comptée à moitié pour les élèves.
+    dedouble_week_count: Dict = {}
     for ev in events.values():
         parsed = parse_course_summary(ev.get("summary", ""))
         if not parsed:
@@ -451,6 +470,15 @@ def analyze_events(events: Dict, today: datetime.date) -> Dict:
         e = ev.get("end_iso")   or ev.get("end_dt",   "")
         key = (s, e, fil2, mod2, nom2)
         slot_classes.setdefault(key, set()).add(cl2)
+
+        if is_dedouble(ev.get("summary", ""), ev.get("description", "")):
+            try:
+                ev_start = datetime.datetime.fromisoformat(s)
+            except Exception:
+                continue
+            monday = ev_start.date() - datetime.timedelta(days=ev_start.date().weekday())
+            dweek_key = (cl2, fil2, mod2, nom2, monday.isoformat())
+            dedouble_week_count[dweek_key] = dedouble_week_count.get(dweek_key, 0) + 1
     regroupement_slots = {k for k, classes in slot_classes.items() if len(classes) > 1}
 
     by_year: Dict = {}
@@ -497,7 +525,10 @@ def analyze_events(events: Dict, today: datetime.date) -> Dict:
                     f"  /!\\ Slot {round(duration*60)}min (30-49 min) non comptabilisé"
                     f" (élève) : {summ[:50]} le {s_iso}"
                 )
-            coeff_eleve = 0.5 if (dedouble and not regroupe) else 1.0
+            monday = start.date() - datetime.timedelta(days=start.date().weekday())
+            dweek_key = (classe, filiere, module, nom, monday.isoformat())
+            vrai_dedouble = dedouble and dedouble_week_count.get(dweek_key, 0) >= 2
+            coeff_eleve = 0.5 if (vrai_dedouble and not regroupe) else 1.0
             eleve_h = eh_raw * coeff_eleve
 
             # --- Heures formateur ---
@@ -2138,7 +2169,7 @@ def run_menu_repartition():
 
 def print_main_menu(cal: str, sy: str):
     print(_green(f"\n{SEP}"))
-    print(_green(f"  AGENT CALENDRIER MFR  —  {cal}"))
+    print(_green(f"  Statistiques, calendrier MFR de {cal} (version {VERSION})"))
     print(_green(f"  Année scolaire : {sy}"))
     print(_green(SEP))
     print("   ► 1 : Statistiques Par CLASSE et par COURS")
