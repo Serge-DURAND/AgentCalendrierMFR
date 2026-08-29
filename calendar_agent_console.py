@@ -141,6 +141,22 @@
 #           le lock file de l'instance légitime en quittant (atexit.register
 #           inconditionnel dès l'import). remove_lock() vérifie maintenant
 #           que le PID dans le lock file est bien le sien avant de le supprimer
+#
+# v6.2.1: Renommage du fichier (anciennement calendar_agent_console_v6_0_4.py,
+#         désynchronisé du VERSION depuis plusieurs versions) + cosmétique console :
+#         horodatage automatique sans crochets, sans année, affiché en gris
+#
+# v6.3  : Refonte de l'affichage des événements "Cours" dans les mails
+#         (Ajouts/Modifications/Suppressions) — format_event_line() :
+#         - Si le résumé suit le motif "Cours : ... salle: ...", affichage
+#           détaillé sur plusieurs lignes au lieu d'une seule ligne dense :
+#           "Date : ..., de ... à ...      Salle : ..." puis "Cours : ..."
+#           puis "Commentaires : ..." (italique, uniquement si non vide)
+#         - Date, heure de début et noms de cours/salle en gras
+#         - Événements non-Cours (RTT, congés, etc.) inchangés (ancien format)
+#         - Espacement (marge) ajouté entre chaque événement de la liste mail
+#         - Nombreuses cosmétiques console (horodatage, couleurs par niveau,
+#           bloc "Paramétrage" au démarrage, messages raccourcis)
 # =====================================================================
 
 import os
@@ -159,12 +175,14 @@ import requests
 import datetime
 import pytz
 import smtplib
+import colorama
+from colorama import Fore, Style
 from typing import Dict, List, Tuple, Any
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from icalendar import Calendar
 
-VERSION = "6.2"
+VERSION = "6.3"
 
 JOURS = ["Lun.", "Mar.", "Mer.", "Jeu.", "Ven.", "Sam.", "Dim."]
 
@@ -193,6 +211,7 @@ LOG_ROTATION_DAYS   = CONFIG.get("log_rotation_days", 30)
 
 SUPPRESSION_IGNORE_DAYS  = 90
 FETCH_WINDOW_PAST_DAYS   = CONFIG.get("fetch_window_past_days", 14)
+DAILY_REMINDER_HOUR      = 7
 
 NOTIFICATION_OWNER_NAME    = CONFIG.get("notification_owner_name", "")
 NOTIFICATION_WINDOW_MIN    = CONFIG.get("notification_window_minutes", 30)
@@ -205,12 +224,43 @@ EMAIL_FOOTER = (
 )
 
 # --- Logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="[{asctime}] {levelname}: {message}",
-    style="{",
-    datefmt="%d/%m/%Y %H:%M"
-)
+colorama.init()
+
+class ColorTimeFormatter(logging.Formatter):
+    """Formatter console : horodatage en gris, niveau colorisé (masqué pour INFO)."""
+    LEVEL_COLORS = {
+        "DEBUG":    Fore.GREEN,
+        "WARNING":  Fore.YELLOW,
+        "ERROR":    Fore.RED,
+        "CRITICAL": Fore.RED,
+    }
+
+    def formatTime(self, record, datefmt=None):
+        timestamp = super().formatTime(record, datefmt)
+        return f"{Fore.LIGHTBLACK_EX}{timestamp}{Style.RESET_ALL}"
+
+    def format(self, record):
+        prefix = f"{self.formatTime(record, self.datefmt)} " if getattr(record, "show_time", True) else ""
+        message = record.getMessage()
+        if record.exc_info:
+            message += "\n" + self.formatException(record.exc_info)
+        color = self.LEVEL_COLORS.get(record.levelname)
+        if color:
+            return f"{prefix}{color}{record.levelname}{Style.RESET_ALL}: {message}"
+        return f"{prefix}{message}"
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(ColorTimeFormatter(datefmt="%d/ %H:%M"))
+logging.basicConfig(level=logging.INFO, handlers=[_console_handler])
+
+def log_info(msg: str, show_time: bool = True) -> None:
+    logging.info(msg, extra={"show_time": show_time})
+
+def log_warning(msg: str, show_time: bool = True) -> None:
+    logging.warning(msg, extra={"show_time": show_time})
+
+def log_error(msg: str, show_time: bool = True) -> None:
+    logging.error(msg, extra={"show_time": show_time})
 
 # --- Gestion du lock file ---
 def _pid_is_running(pid: int) -> bool:
@@ -244,9 +294,9 @@ def create_lock() -> None:
         except ValueError:
             pid = None
         if pid is not None and _pid_is_running(pid):
-            logging.error("Une instance est déjà en cours !")
+            log_error("Une instance est déjà en cours !")
             sys.exit(1)
-        logging.warning(
+        log_warning(
             f"Lock file fantôme détecté (PID {pid}), "
             "le processus précédent s'est terminé anormalement. Démarrage..."
         )
@@ -271,7 +321,9 @@ def remove_lock() -> None:
         except (ValueError, OSError):
             pass
         os.remove(LOCK_FILE)
-        logging.info("Lock file supprimé proprement.")
+        print("\n" * 3, end="")
+        log_info(f"{Fore.RED}Lock file supprimé proprement.{Style.RESET_ALL}")
+        print("\n" * 3, end="")
 
 def handle_exit(signum=None, frame=None) -> None:
     remove_lock()
@@ -353,13 +405,32 @@ def detect_field_changes(ev_new: Dict, ev_old: Dict) -> List[str]:
     return changes
 
 def format_event_line(ev: Dict[str, Any]) -> str:
-    """Formate une ligne d'événement : date/heure + nature + (Détail si non vide)."""
+    """Formate une ligne d'événement : date/heure + nature + (Détail si non vide).
+    Si le résumé suit le motif "Cours : ... salle: ...", affichage détaillé sur
+    plusieurs lignes (Date / Cours / Salle / Commentaires) au lieu d'une ligne unique."""
+    summary = ev.get("summary", "") or ""
+    m = re.search(r"cours\s*:\s*(.*?)\s*salle\s*:\s*(.*)$", summary, re.IGNORECASE)
+    if m:
+        cours_nom = m.group(1).strip()
+        salle_nom = m.group(2).strip()
+        start     = ensure_datetime(ev["start_dt"])
+        end       = ensure_datetime(ev["end_dt"])
+        lignes = [
+            f"Date : <b>{format_date_with_day(start)}</b>, de <b>{start.strftime('%H:%M')}</b> à {end.strftime('%H:%M')}"
+            f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Salle : <b>{salle_nom}</b>",
+            f"Cours : <b>{cours_nom}</b>",
+        ]
+        commentaire = (ev.get("description") or "").strip()
+        if commentaire:
+            lignes.append(f"Commentaires : <i>{commentaire}</i>")
+        return "<br>".join(lignes)
+
     lieu       = f" – Lieu: {ev.get('location','')}" if ev.get("location") else ""
     detail     = (ev.get("description") or "").strip()
     detail_str = f" ({detail})" if detail else ""
     return (
         f"{format_start_end(ev['start_dt'], ev['end_dt'])} "
-        f"{ev['summary']}{lieu}{detail_str}"
+        f"{summary}{lieu}{detail_str}"
     )
 
 def format_changes_with_values(ev_new: Dict, ev_old: Dict, changes: List[str]) -> str:
@@ -412,7 +483,7 @@ def send_email(to_addr: str, subject: str, body: str) -> bool:
     if not to_addr:
         return True
     if not SMTP_SERVER:
-        logging.error("SMTP non configuré, mail non envoyé")
+        log_error("SMTP non configuré, mail non envoyé")
         return False
     try:
         msg = MIMEMultipart()
@@ -427,7 +498,7 @@ def send_email(to_addr: str, subject: str, body: str) -> bool:
             server.send_message(msg)
         return True
     except Exception as e:
-        logging.error(f"Erreur envoi mail via {SMTP_SERVER}:{SMTP_PORT} → {e}")
+        log_error(f"Erreur envoi mail via {SMTP_SERVER}:{SMTP_PORT} → {e}")
         return False
 
 def fetch_events(url: str) -> Tuple[Dict[str, Dict[str, Any]], bool]:
@@ -454,7 +525,7 @@ def fetch_events(url: str) -> Tuple[Dict[str, Dict[str, Any]], bool]:
             events[make_event_key(ev)] = ev
         return events, True
     except Exception as e:
-        logging.error(f"Erreur récupération {url}: {e}")
+        log_error(f"Erreur récupération {url}: {e}")
         return {}, False
 
 def serialize_events(events: Dict) -> Dict:
@@ -473,7 +544,7 @@ def deserialize_events(raw: Dict) -> Tuple[Dict, bool]:
     for cal_id, cal_events in raw.items():
         for key in cal_events:
             if "|" not in key:
-                logging.warning(
+                log_warning(
                     "Ancien format d'état détecté (clé = UID seul). "
                     "Démarrage à zéro pour éviter les faux positifs v4→v5."
                 )
@@ -516,7 +587,7 @@ def rotate_logs() -> None:
         with open(LOG_FILE, "w", encoding="utf-8") as f:
             json.dump(filtered, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        logging.error(f"Erreur rotation des logs: {e}")
+        log_error(f"Erreur rotation des logs: {e}")
 
 def extract_event_nature(summary: str) -> str:
     if ":" in summary:
@@ -534,7 +605,7 @@ def format_french_date(dt: datetime.datetime) -> str:
 
 def should_send_daily_reminder() -> bool:
     now = datetime.datetime.now(TIMEZONE)
-    if now.hour < 7:
+    if now.hour < DAILY_REMINDER_HOUR:
         return False
     if now.weekday() >= 5:
         return False
@@ -566,7 +637,7 @@ def send_daily_reminder(cal_id: str, events: Dict[str, Dict[str, Any]], to_addr:
             })
     date_str = format_french_date(now_dt)
     if not today_events:
-        logging.info(f"Aucun événement aujourd'hui pour {cal_id}, mail envoyé avec mention.")
+        log_info(f"Aucun événement aujourd'hui pour {cal_id}, mail envoyé avec mention.")
         html_body = (
             f'<h2 style="color: #404040;">Votre journée du {date_str}</h2>'
             f"<p>Pas d'événement pour aujourd'hui.</p>"
@@ -579,7 +650,7 @@ def send_daily_reminder(cal_id: str, events: Dict[str, Dict[str, Any]], to_addr:
             html_body += f"<li>{ev['time']} : {ev['nature']} : {detail_part}{ev['lieu']}</li>"
         html_body += "</ul><p>Bonne journée !</p>"
     send_email(to_addr, "Votre journée", html_body)
-    logging.info(f"Mail de rappel quotidien envoyé pour {cal_id}")
+    log_info(f"Mail de rappel quotidien envoyé pour {cal_id}")
 
 
 # =====================================================================
@@ -746,7 +817,7 @@ def _create_toast_window(ev: Dict[str, Any], key: str, window_index: int, minute
         with _notification_lock:
             if key in _notification_state:
                 _notification_state[key]["acknowledged"] = True
-        logging.info(f"[Notif] Acquitté : {ev['summary']}")
+        log_info(f"[Notif] Acquitté : {ev['summary']}")
         _decrement()
         win.destroy()
 
@@ -755,7 +826,7 @@ def _create_toast_window(ev: Dict[str, Any], key: str, window_index: int, minute
         with _notification_lock:
             if key in _notification_state:
                 _notification_state[key]["snoozed_until"] = snooze_until
-        logging.info(
+        log_info(
             f"[Notif] Snooze activé pour '{ev['summary']}' "
             f"(rappel à {snooze_until.strftime('%H:%M')})"
         )
@@ -790,7 +861,7 @@ def _fire_toast(ev: Dict[str, Any], key: str, minutes_until: int) -> None:
         _open_windows_count += 1
 
     _tk_queue.put((_create_toast_window, (ev, key, window_index, minutes_until)))
-    logging.info(f"[Notif] Fenêtre affichée : Dans {minutes_until} min — {ev['summary']}")
+    log_info(f"[Notif] Fenêtre affichée : Dans {minutes_until} min — {ev['summary']}")
 
 
 def check_and_notify(events: Dict[str, Dict[str, Any]]) -> None:
@@ -859,19 +930,40 @@ def check_and_notify(events: Dict[str, Dict[str, Any]]) -> None:
 # =====================================================================
 
 def main() -> None:
+    create_lock()
+    log_info(f"{Fore.RED}>>> Agent calendrier démarré (v{VERSION}) <<<{Style.RESET_ALL}")
+
+    print()
+    log_info("   --- Paramétrage ---", show_time=False)
+    log_info("       Calendriers analysés :", show_time=False)
+    for cal_cfg in CALENDARS:
+        email = cal_cfg.get("email")
+        mail_clause  = f"mails vers {email}" if email else "PAS de mails"
+        daily_clause = "résumé de la journée" if cal_cfg.get("send_daily_reminder", False) else "PAS de résumé de la journée"
+        log_info(
+            f"          - {Fore.CYAN}{cal_cfg.get('name', 'Inconnu')}{Style.RESET_ALL} : {mail_clause}, {daily_clause}",
+            show_time=False
+        )
+    print()
+    log_info(f"       Le résumé quotidien est envoyé à partir de {DAILY_REMINDER_HOUR:02d}h00.", show_time=False)
+
+    startup_minutes     = CHECK_INTERVAL / 60
+    startup_minutes_str = f"{startup_minutes:.1f}" if startup_minutes % 1 else f"{int(startup_minutes)}"
+    log_info(f"       La tâche d'analyse des calendriers est lancée toutes les {startup_minutes_str} minutes.", show_time=False)
+
+    print()
     if not NOTIFICATION_OWNER_NAME:
-        logging.warning(
-            "Paramètre 'notification_owner_name' absent de config.json. "
-            "Les notifications sont désactivées."
+        log_warning(
+            "       Paramètre 'notification_owner_name' absent de config.json. "
+            "Les notifications sont désactivées.",
+            show_time=False
         )
     else:
-        logging.info(
-            f"Notifications activées pour '{NOTIFICATION_OWNER_NAME}' "
-            f"(fenêtre : {NOTIFICATION_WINDOW_MIN} min, snooze : {NOTIFICATION_SNOOZE_MIN} min)"
+        log_info(
+            f"       Notifications activées pour '{NOTIFICATION_OWNER_NAME}' "
+            f"(fenêtre : {NOTIFICATION_WINDOW_MIN} min, snooze : {NOTIFICATION_SNOOZE_MIN} min)",
+            show_time=False
         )
-
-    create_lock()
-    logging.info(f">>> Agent calendrier démarré (v{VERSION}) <<<")
 
     previous_state = {}
     events_log     = []
@@ -884,7 +976,7 @@ def main() -> None:
             previous_state, forced_first_run = deserialize_events(raw)
             first_run = forced_first_run
         except Exception as e:
-            logging.warning(f"Impossible de lire {STATE_FILE} ({e}), démarrage à zéro.")
+            log_warning(f"Impossible de lire {STATE_FILE} ({e}), démarrage à zéro.")
             previous_state = {}
             first_run      = True
 
@@ -896,27 +988,23 @@ def main() -> None:
                 entry["timestamp"] = datetime.datetime.fromisoformat(entry["timestamp"])
             events_log = events_log_raw
         except Exception:
-            logging.warning(f"{LOG_FILE} invalide, création d'un nouveau log.")
+            log_warning(f"{LOG_FILE} invalide, création d'un nouveau log.")
             events_log = []
 
     while True:
-        now = datetime.datetime.now(TIMEZONE)
         print()
-        logging.info(
-            f"--- Vérification le {now.strftime('%d/%m/%Y')} à {now.strftime('%H:%M')}"
-            f"   (AgentCalendrierMFR version {VERSION}) ---"
-        )
+        log_info(f"{Fore.LIGHTBLACK_EX}   --- Analyse des calendriers ---{Style.RESET_ALL}")
 
         # --- Rappels quotidiens ---
         if should_send_daily_reminder():
             for cal_cfg in CALENDARS:
                 cal_id = cal_cfg.get("name", "Inconnu")
-                logging.info(f"Préparation du mail quotidien pour {cal_id}...")
+                log_info(f"Préparation du mail quotidien pour {cal_id}...")
                 new_events, success = fetch_events(cal_cfg.get("url"))
                 if not success:
                     continue
                 if not cal_cfg.get("send_daily_reminder", False):
-                    logging.info(f"Mail quotidien désactivé pour {cal_id} (config).")
+                    log_info(f"Mail quotidien désactivé pour {cal_id} (config).")
                     continue
                 if cal_cfg.get("email"):
                     send_daily_reminder(cal_id, new_events, cal_cfg["email"])
@@ -924,10 +1012,9 @@ def main() -> None:
         # --- Vérification des calendriers ---
         for cal_cfg in CALENDARS:
             cal_id = cal_cfg.get("name", "Inconnu")
-            logging.info(f"Vérification calendrier {cal_id}...")
             new_events, success = fetch_events(cal_cfg.get("url"))
             if not success:
-                logging.warning(f"Calendrier {cal_id} inaccessible, vérification ignorée.")
+                log_warning(f"Calendrier {cal_id} inaccessible, vérification ignorée.")
                 continue
 
             # --- Notifications toast (propriétaire uniquement) ---
@@ -998,7 +1085,6 @@ def main() -> None:
                     events_log.append({"timestamp": now_dt, "action": "suppression_passee", "event": ev_old})
 
             # --- Notifications console et mail ---
-            timestamp = datetime.datetime.now(TIMEZONE)
             sections = [
                 ("Ajout",                     "Ajouts",                     added),
                 ("Modification",              "Modifications",              modified),
@@ -1008,12 +1094,13 @@ def main() -> None:
             total_changes = len(added) + len(modified) + len(removed_future) + len(removed_past)
 
             if not first_run and total_changes > 0:
+                log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}")
                 html_msg = f'<h2 style="color: #404040;">{cal_id} — Résumé des modifications</h2>'
                 for sing, plur, evts in sections:
                     if not evts:
                         continue
                     count_str = pluriel(len(evts), sing, plur)
-                    logging.info(f"[{timestamp.strftime('%d/%m/%Y %H:%M')}] {count_str}")
+                    log_info(f"  - {Fore.LIGHTGREEN_EX}{count_str}{Style.RESET_ALL}")
                     html_msg += f'<h3 style="color: #00008B; margin-bottom: 0;">{count_str}</h3><ul style="margin-top: 0;">'
                     for ev in evts:
                         if sing == "Modification":
@@ -1025,7 +1112,7 @@ def main() -> None:
                             )
                         else:
                             msg_line = format_event_line(ev)
-                        html_msg += f"<li>{msg_line}</li>"
+                        html_msg += f'<li style="margin-top: 12px;">{msg_line}</li>'
                     html_msg += "</ul>"
 
                 mail_ok = True
@@ -1036,11 +1123,13 @@ def main() -> None:
                         html_msg
                     )
                 if not mail_ok:
-                    logging.warning(
+                    log_warning(
                         f"Mail non envoyé pour {cal_id} — état non mis à jour, "
                         "les changements seront renvoyés au prochain cycle."
                     )
                     continue
+            else:
+                log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}  {Fore.GREEN}pas de changement détecté{Style.RESET_ALL}")
 
             previous_state[cal_id] = new_events
 
@@ -1051,15 +1140,12 @@ def main() -> None:
         rotate_logs()
 
         if first_run:
-            logging.info(">>> Première exécution terminée : aucune notification envoyée <<<")
+            log_info(">>> Première exécution terminée : aucune notification envoyée <<<")
             first_run = False
 
         minutes     = CHECK_INTERVAL / 60
         minutes_str = f"{minutes:.1f}" if minutes % 1 else f"{int(minutes)}"
-        logging.info(
-            f"--- Fin vérification ({datetime.datetime.now(TIMEZONE).strftime('%d/%m/%Y %H:%M')}), "
-            f"prochaine vérification dans {minutes_str} minutes ---"
-        )
+        log_info(f"{Fore.LIGHTBLACK_EX}   --- Terminé, prochaine vérification dans {minutes_str} minutes ---{Style.RESET_ALL}")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
