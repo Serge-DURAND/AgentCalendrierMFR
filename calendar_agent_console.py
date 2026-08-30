@@ -589,13 +589,6 @@ def rotate_logs() -> None:
     except Exception as e:
         log_error(f"Erreur rotation des logs: {e}")
 
-def extract_event_nature(summary: str) -> str:
-    if ":" in summary:
-        nature_part = summary.split(":")[0].strip()
-        rest_part   = summary.split(":")[1].split("-")[0].strip()
-        return f"{nature_part} {rest_part}"
-    return summary
-
 def format_french_date(dt: datetime.datetime) -> str:
     months = [
         "janvier", "février", "mars", "avril", "mai", "juin",
@@ -624,18 +617,8 @@ def should_send_daily_reminder() -> bool:
 def send_daily_reminder(cal_id: str, events: Dict[str, Dict[str, Any]], to_addr: str) -> None:
     now_dt       = datetime.datetime.now(TIMEZONE)
     today        = now_dt.date()
-    today_events = []
-    for key, ev in events.items():
-        if ensure_datetime(ev["start_dt"]).date() == today:
-            nature = extract_event_nature(ev["summary"])
-            lieu   = f", salle: {ev.get('location', '')}" if ev.get("location") else ""
-            today_events.append({
-                "time":   format_time_only(ev["start_dt"], ev["end_dt"]),
-                "nature": nature,
-                "detail": ev["summary"],
-                "lieu":   lieu,
-            })
-    date_str = format_french_date(now_dt)
+    today_events = [ev for ev in events.values() if ensure_datetime(ev["start_dt"]).date() == today]
+    date_str     = format_french_date(now_dt)
     if not today_events:
         log_info(f"Aucun événement aujourd'hui pour {cal_id}, mail envoyé avec mention.")
         html_body = (
@@ -645,9 +628,8 @@ def send_daily_reminder(cal_id: str, events: Dict[str, Dict[str, Any]], to_addr:
         )
     else:
         html_body = f'<h2 style="color: #404040;">Votre journée du {date_str}</h2><ul>'
-        for ev in sorted(today_events, key=lambda x: x["time"]):
-            detail_part = ev["detail"].split("-")[1].strip() if "-" in ev["detail"] else ev["detail"]
-            html_body += f"<li>{ev['time']} : {ev['nature']} : {detail_part}{ev['lieu']}</li>"
+        for ev in sorted(today_events, key=lambda e: ensure_datetime(e["start_dt"])):
+            html_body += f'<li style="margin-top: 12px;">{format_event_line(ev)}</li>'
         html_body += "</ul><p>Bonne journée !</p>"
     send_email(to_addr, "Votre journée", html_body)
     log_info(f"Mail de rappel quotidien envoyé pour {cal_id}")
