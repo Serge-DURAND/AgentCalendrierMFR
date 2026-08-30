@@ -404,10 +404,11 @@ def detect_field_changes(ev_new: Dict, ev_old: Dict) -> List[str]:
                 changes.append(field)
     return changes
 
-def format_event_line(ev: Dict[str, Any]) -> str:
+def format_event_line(ev: Dict[str, Any], show_date: bool = True) -> str:
     """Formate une ligne d'événement : date/heure + nature + (Détail si non vide).
     Si le résumé suit le motif "Cours : ... salle: ...", affichage détaillé sur
-    plusieurs lignes (Date / Cours / Salle / Commentaires) au lieu d'une ligne unique."""
+    plusieurs lignes (Date / Cours / Salle / Commentaires) au lieu d'une ligne unique.
+    show_date=False omet la date (mail du matin, où elle est déjà dans le titre)."""
     summary = ev.get("summary", "") or ""
     m = re.search(r"cours\s*:\s*(.*?)\s*salle\s*:\s*(.*)$", summary, re.IGNORECASE)
     if m:
@@ -415,9 +416,14 @@ def format_event_line(ev: Dict[str, Any]) -> str:
         salle_nom = m.group(2).strip()
         start     = ensure_datetime(ev["start_dt"])
         end       = ensure_datetime(ev["end_dt"])
+        if show_date:
+            heure_ligne = (
+                f"Date : <b>{format_date_with_day(start)}</b>, de <b>{start.strftime('%H:%M')}</b> à {end.strftime('%H:%M')}"
+            )
+        else:
+            heure_ligne = f"De <b>{start.strftime('%H:%M')}</b> à {end.strftime('%H:%M')}"
         lignes = [
-            f"Date : <b>{format_date_with_day(start)}</b>, de <b>{start.strftime('%H:%M')}</b> à {end.strftime('%H:%M')}"
-            f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Salle : <b>{salle_nom}</b>",
+            f"{heure_ligne}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Salle : <b>{salle_nom}</b>",
             f"Cours : <b>{cours_nom}</b>",
         ]
         commentaire = (ev.get("description") or "").strip()
@@ -428,8 +434,9 @@ def format_event_line(ev: Dict[str, Any]) -> str:
     lieu       = f" – Lieu: {ev.get('location','')}" if ev.get("location") else ""
     detail     = (ev.get("description") or "").strip()
     detail_str = f" ({detail})" if detail else ""
+    horaire    = format_start_end(ev["start_dt"], ev["end_dt"]) if show_date else format_time_only(ev["start_dt"], ev["end_dt"])
     return (
-        f"{format_start_end(ev['start_dt'], ev['end_dt'])} "
+        f"{horaire} "
         f"{summary}{lieu}{detail_str}"
     )
 
@@ -590,11 +597,14 @@ def rotate_logs() -> None:
         log_error(f"Erreur rotation des logs: {e}")
 
 def format_french_date(dt: datetime.datetime) -> str:
+    jours = [
+        "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"
+    ]
     months = [
         "janvier", "février", "mars", "avril", "mai", "juin",
         "juillet", "août", "septembre", "octobre", "novembre", "décembre"
     ]
-    return f"{jour_semaine(dt)} {dt.day} {months[dt.month - 1]} {dt.year}"
+    return f"{jours[dt.weekday()]} {dt.day} {months[dt.month - 1]} {dt.year}"
 
 def should_send_daily_reminder() -> bool:
     now = datetime.datetime.now(TIMEZONE)
@@ -629,7 +639,7 @@ def send_daily_reminder(cal_id: str, events: Dict[str, Dict[str, Any]], to_addr:
     else:
         html_body = f'<h2 style="color: #404040;">Votre journée du {date_str}</h2><ul>'
         for ev in sorted(today_events, key=lambda e: ensure_datetime(e["start_dt"])):
-            html_body += f'<li style="margin-top: 12px;">{format_event_line(ev)}</li>'
+            html_body += f'<li style="margin-top: 12px;">{format_event_line(ev, show_date=False)}</li>'
         html_body += "</ul><p>Bonne journée !</p>"
     send_email(to_addr, "Votre journée", html_body)
     log_info(f"Mail de rappel quotidien envoyé pour {cal_id}")
