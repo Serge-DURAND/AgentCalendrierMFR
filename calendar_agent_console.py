@@ -157,6 +157,45 @@
 #         - Espacement (marge) ajouté entre chaque événement de la liste mail
 #         - Nombreuses cosmétiques console (horodatage, couleurs par niveau,
 #           bloc "Paramétrage" au démarrage, messages raccourcis)
+#
+# v6.4  : Même refonte que v6.3, appliquée aux événements "Conseil de Classe"
+#         (Ajouts/Modifications/Suppressions, format_event_line()) :
+#         - Si le résumé commence par "Conseil de Classe", affichage détaillé :
+#           "CONSEIL DE CLASSE" (majuscules) puis "Date : ..., de ... à ..."
+#           puis "Classe : ..." (reste du résumé) puis la description
+#           (déjà au format "Personnel : ...", affichée telle quelle)
+#
+# v6.4.1: Deux ajustements mineurs de format_event_line(), suite à v6.4 :
+#         - Format minimaliste pour tous les événements restants (ni Cours, ni
+#           Conseil de Classe, ni Service — RTT, Formation, Divers, RDV, etc.) :
+#           résumé en majuscules, puis "Date : ..., de ... à ..." (+ "Salle : ..."
+#           si le champ location n'est pas vide), puis "Commentaires : ..."
+#           (italique, si la description n'est pas vide)
+#         - Reformatage des événements "Serv : Matin/Midi/Soir" :
+#           - Titre fixe par type (_SERVICE_TITRES) : "CANTINE (Service du Midi)",
+#             "Etude (Service soir/ETUDE)", "SOUTIEN SCOLAIRE (service soir/SOUTIEN)"
+#           - Date : uniquement le jour de début (le créneau iCal réel est un jour
+#             entier 00:00→00:00 J+1, sans rapport avec l'horaire réel du service)
+#           - Horaire fixe par type (_SERVICE_HORAIRES), pas l'horaire iCal :
+#             Midi 12:00-13:20, Matin/Soir 17:45-18:45
+#           - Salle et Commentaires affichés seulement si non vides (même règle
+#             que Cours/Conseil de Classe/Autres)
+#
+# v6.4.2: Nettoyage console autour des rappels quotidiens et des pannes réseau :
+#         - Suppression de la ligne "Préparation du mail quotidien pour X..."
+#           (bruit inutile, le statut final suffit)
+#         - Ligne de statut du rappel quotidien recolorée comme les lignes de
+#           vérification : "{cal_id} en cyan  {statut} en vert"
+#         - Suppression de la ligne "Aucun événement aujourd'hui pour X, mail
+#           envoyé avec mention." dans send_daily_reminder() (redondante avec
+#           la ligne de statut finale)
+#         - fetch_events() distingue maintenant une panne réseau générale
+#           (DNS/connexion/timeout) d'une erreur propre à un calendrier, et ne
+#           logue plus l'URL complète (qui contient le token d'accès) ; la
+#           boucle de vérification arrête d'essayer les calendriers suivants
+#           dès qu'une panne réseau est détectée, avec une seule ligne résumé
+#           ("Réseau indisponible, cycle ignoré (N calendriers).") au lieu
+#           d'un ERROR+WARNING répété pour chaque calendrier
 # =====================================================================
 
 import os
@@ -182,7 +221,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from icalendar import Calendar
 
-VERSION = "6.3"
+VERSION = "6.4.2"
 
 JOURS = ["Lun.", "Mar.", "Mer.", "Jeu.", "Ven.", "Sam.", "Dim."]
 
@@ -404,11 +443,32 @@ def detect_field_changes(ev_new: Dict, ev_old: Dict) -> List[str]:
                 changes.append(field)
     return changes
 
+# Titre et horaire fixes affichés pour les événements "Serv : Matin/Midi/Soir"
+# (le champ iCal est un jour entier 00:00→00:00 J+1, sans lien avec l'horaire
+# réel du service — voir format_event_line()).
+_SERVICE_TITRES = {
+    "midi":  "CANTINE (Service du Midi)",
+    "soir":  "Etude (Service soir/ETUDE)",
+    "matin": "SOUTIEN SCOLAIRE (service soir/SOUTIEN)",
+}
+_SERVICE_HORAIRES = {
+    "midi":  ("12:00", "13:20"),
+    "soir":  ("17:45", "18:45"),
+    "matin": ("17:45", "18:45"),
+}
+
 def format_event_line(ev: Dict[str, Any], show_date: bool = True) -> str:
     """Formate une ligne d'événement : date/heure + nature + (Détail si non vide).
     Si le résumé suit le motif "Cours : ... salle: ...", affichage détaillé sur
     plusieurs lignes (Date / Cours / Salle / Commentaires) au lieu d'une ligne unique.
-    show_date=False omet la date (mail du matin, où elle est déjà dans le titre)."""
+    Même principe pour "Conseil de Classe ..." (CONSEIL DE CLASSE / Date / Classe /
+    Personnel) et pour "Serv : Matin/Midi/Soir" (titre fixe _SERVICE_TITRES / Date
+    (début uniquement) avec horaire fixe _SERVICE_HORAIRES, le créneau iCal réel
+    étant un jour entier sans rapport avec l'horaire du service / Salle-Commentaires
+    si non vides). Tous les autres événements (RTT, Formation, Divers, etc.) ont un
+    format minimaliste à 2-3 lignes : NOM DE L'ÉVÉNEMENT / Date-heure(-Salle) /
+    Commentaires. show_date=False omet la date (mail du matin, où elle est déjà
+    dans le titre)."""
     summary = ev.get("summary", "") or ""
     m = re.search(r"cours\s*:\s*(.*?)\s*salle\s*:\s*(.*)$", summary, re.IGNORECASE)
     if m:
@@ -431,14 +491,60 @@ def format_event_line(ev: Dict[str, Any], show_date: bool = True) -> str:
             lignes.append(f"Commentaires : <i>{commentaire}</i>")
         return "<br>".join(lignes)
 
-    lieu       = f" – Lieu: {ev.get('location','')}" if ev.get("location") else ""
-    detail     = (ev.get("description") or "").strip()
-    detail_str = f" ({detail})" if detail else ""
-    horaire    = format_start_end(ev["start_dt"], ev["end_dt"]) if show_date else format_time_only(ev["start_dt"], ev["end_dt"])
-    return (
-        f"{horaire} "
-        f"{summary}{lieu}{detail_str}"
-    )
+    m_cdc = re.match(r"conseil\s+de\s+classe\s*(.*)$", summary.strip(), re.IGNORECASE)
+    if m_cdc:
+        classe_nom = m_cdc.group(1).strip()
+        start      = ensure_datetime(ev["start_dt"])
+        end        = ensure_datetime(ev["end_dt"])
+        if show_date:
+            heure_ligne = (
+                f"Date : <b>{format_date_with_day(start)}</b>, de <b>{start.strftime('%H:%M')}</b> à {end.strftime('%H:%M')}"
+            )
+        else:
+            heure_ligne = f"De <b>{start.strftime('%H:%M')}</b> à {end.strftime('%H:%M')}"
+        lignes = ["<b>CONSEIL DE CLASSE</b>", heure_ligne]
+        if classe_nom:
+            lignes.append(f"Classe : <b>{classe_nom}</b>")
+        commentaire = (ev.get("description") or "").strip()
+        if commentaire:
+            lignes.append(commentaire)
+        return "<br>".join(lignes)
+
+    m_serv = re.match(r"serv\s*:\s*(matin|midi|soir)\s*$", summary.strip(), re.IGNORECASE)
+    if m_serv:
+        type_serv = m_serv.group(1).lower()
+        titre    = _SERVICE_TITRES[type_serv]
+        h_debut, h_fin = _SERVICE_HORAIRES[type_serv]
+        start    = ensure_datetime(ev["start_dt"])
+        if show_date:
+            heure_ligne = f"Date : <b>{format_date_with_day(start)}</b>, de <b>{h_debut}</b> à {h_fin}"
+        else:
+            heure_ligne = f"De <b>{h_debut}</b> à {h_fin}"
+        if ev.get("location"):
+            heure_ligne += f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Salle : <b>{ev['location']}</b>"
+        lignes = [f"<b>{titre}</b>", heure_ligne]
+        commentaire = (ev.get("description") or "").strip()
+        if commentaire:
+            lignes.append(f"Commentaires : <i>{commentaire}</i>")
+        return "<br>".join(lignes)
+
+    # "Autres" (ni Cours, ni Conseil de Classe, ni Service) : format minimaliste
+    # générique — nom de l'événement / date-heure(-salle) / commentaire.
+    start = ensure_datetime(ev["start_dt"])
+    end   = ensure_datetime(ev["end_dt"])
+    if show_date:
+        heure_ligne = (
+            f"Date : <b>{format_date_with_day(start)}</b>, de <b>{start.strftime('%H:%M')}</b> à {end.strftime('%H:%M')}"
+        )
+    else:
+        heure_ligne = f"De <b>{start.strftime('%H:%M')}</b> à {end.strftime('%H:%M')}"
+    if ev.get("location"):
+        heure_ligne += f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Salle : <b>{ev['location']}</b>"
+    lignes = [f"<b>{summary.upper()}</b>", heure_ligne]
+    commentaire = (ev.get("description") or "").strip()
+    if commentaire:
+        lignes.append(f"Commentaires : <i>{commentaire}</i>")
+    return "<br>".join(lignes)
 
 def format_changes_with_values(ev_new: Dict, ev_old: Dict, changes: List[str]) -> str:
     """Formate le détail des changements avec anciennes et nouvelles valeurs."""
@@ -508,7 +614,14 @@ def send_email(to_addr: str, subject: str, body: str) -> bool:
         log_error(f"Erreur envoi mail via {SMTP_SERVER}:{SMTP_PORT} → {e}")
         return False
 
-def fetch_events(url: str) -> Tuple[Dict[str, Dict[str, Any]], bool]:
+def fetch_events(url: str) -> Tuple[Dict[str, Dict[str, Any]], bool, bool]:
+    """Retourne (events, success, network_error).
+    network_error=True si l'échec est probablement dû à une coupure réseau
+    générale (DNS/connexion/timeout) plutôt qu'à un problème propre à ce
+    calendrier — permet à l'appelant de ne pas retenter inutilement les
+    calendriers suivants du même cycle. Les messages d'erreur loggués restent
+    volontairement courts (pas de dump de l'URL, qui contient le token d'accès
+    du calendrier)."""
     try:
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
@@ -530,10 +643,17 @@ def fetch_events(url: str) -> Tuple[Dict[str, Dict[str, Any]], bool]:
                 "end_dt":      end_dt,
             }
             events[make_event_key(ev)] = ev
-        return events, True
+        return events, True, False
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        log_error("Réseau indisponible, récupération impossible")
+        return {}, False, True
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response is not None else "?"
+        log_error(f"Erreur récupération calendrier : HTTP {code}")
+        return {}, False, False
     except Exception as e:
-        log_error(f"Erreur récupération {url}: {e}")
-        return {}, False
+        log_error(f"Erreur récupération calendrier : {type(e).__name__}")
+        return {}, False, False
 
 def serialize_events(events: Dict) -> Dict:
     serialized = {}
@@ -630,7 +750,6 @@ def send_daily_reminder(cal_id: str, events: Dict[str, Dict[str, Any]], to_addr:
     today_events = [ev for ev in events.values() if ensure_datetime(ev["start_dt"]).date() == today]
     date_str     = format_french_date(now_dt)
     if not today_events:
-        log_info(f"Aucun événement aujourd'hui pour {cal_id}, mail envoyé avec mention.")
         html_body = (
             f'<h2 style="color: #404040;">Votre journée du {date_str}</h2>'
             f"<p>Pas d'événement pour aujourd'hui.</p>"
@@ -642,7 +761,7 @@ def send_daily_reminder(cal_id: str, events: Dict[str, Dict[str, Any]], to_addr:
             html_body += f'<li style="margin-top: 12px;">{format_event_line(ev, show_date=False)}</li>'
         html_body += "</ul><p>Bonne journée !</p>"
     send_email(to_addr, "Votre journée", html_body)
-    log_info(f"Mail de rappel quotidien envoyé pour {cal_id}")
+    log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}  {Fore.GREEN}mail envoyé{Style.RESET_ALL}")
 
 
 # =====================================================================
@@ -991,21 +1110,24 @@ def main() -> None:
         if should_send_daily_reminder():
             for cal_cfg in CALENDARS:
                 cal_id = cal_cfg.get("name", "Inconnu")
-                log_info(f"Préparation du mail quotidien pour {cal_id}...")
-                new_events, success = fetch_events(cal_cfg.get("url"))
+                new_events, success, _ = fetch_events(cal_cfg.get("url"))
                 if not success:
                     continue
                 if not cal_cfg.get("send_daily_reminder", False):
-                    log_info(f"Mail quotidien désactivé pour {cal_id} (config).")
+                    log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}  {Fore.GREEN}mail non envoyé (désactivé){Style.RESET_ALL}")
                     continue
                 if cal_cfg.get("email"):
                     send_daily_reminder(cal_id, new_events, cal_cfg["email"])
 
         # --- Vérification des calendriers ---
-        for cal_cfg in CALENDARS:
+        for i, cal_cfg in enumerate(CALENDARS):
             cal_id = cal_cfg.get("name", "Inconnu")
-            new_events, success = fetch_events(cal_cfg.get("url"))
+            new_events, success, network_error = fetch_events(cal_cfg.get("url"))
             if not success:
+                if network_error:
+                    skipped = len(CALENDARS) - i
+                    log_warning(f"Réseau indisponible, cycle ignoré ({pluriel(skipped, 'calendrier')}).")
+                    break
                 log_warning(f"Calendrier {cal_id} inaccessible, vérification ignorée.")
                 continue
 
