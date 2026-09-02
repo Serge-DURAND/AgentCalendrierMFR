@@ -1048,9 +1048,9 @@ def _load_and_show(state: Dict, section: int) -> Dict:
 _JOURS = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
 
 # Format unique utilisé pour l'en-tête ET les lignes de données du tableau détail
-# Colonnes : date(17) début(5) fin(5) durée(8) std(5) statut(12) dédoublé
-_DET_FMT = "  {:<4}  {:<17}  {:<22}  {:<12}  {}"
-_DET_SEP = "─" * 70
+# Colonnes : n°(4) lundi(5) date(17) début(5) fin(5) durée(8) std(5) statut(12) dédoublé
+_DET_FMT = "  {:<4}  {:<5}  {:<17}  {:<22}  {:<12}  {}"
+_DET_SEP = "─" * 77
 
 
 def _collect_class_courses() -> List[Tuple[str, str]]:
@@ -1111,19 +1111,28 @@ def _get_detail_events(classe: str, course_key: str, today: datetime.date) -> Li
     return sorted(results, key=lambda x: x[0])
 
 
+# Paires de créneaux qui sont en réalité un seul cours coupé en deux dans le
+# calendrier : (début 1er créneau, jonction = fin 1er/début 2nd, fin 2nd créneau).
+_MERGE_PAIRS = {
+    ('15:25', '16:25', '17:30'),
+    ('13:20', '14:30', '15:50'),   # vendredi après-midi (1h10 + 1h20)
+}
+
 def _merge_consecutive_events(evts):
-    """Fusionne uniquement la paire 15:25-16:25 + 16:25-17:30 (même jour, même statut)."""
+    """Fusionne les paires de créneaux consécutifs listées dans _MERGE_PAIRS
+    (même jour, même statut dédoublé/regroupé) : bizarrerie du calendrier où
+    un seul cours réel est saisi en deux événements successifs."""
     if not evts:
         return evts
     merged = []
     i = 0
     while i < len(evts):
         start, end, dur, past, dedouble, regroupe = evts[i]
+        key = (start.strftime('%H:%M'), end.strftime('%H:%M'),
+               evts[i + 1][1].strftime('%H:%M') if i + 1 < len(evts) else None)
         if (i + 1 < len(evts)
-                and start.strftime('%H:%M') == '15:25'
-                and end.strftime('%H:%M') == '16:25'
-                and evts[i + 1][0].strftime('%H:%M') == '16:25'
-                and evts[i + 1][1].strftime('%H:%M') == '17:30'
+                and key in _MERGE_PAIRS
+                and evts[i + 1][0].strftime('%H:%M') == end.strftime('%H:%M')
                 and evts[i + 1][0].date() == start.date()
                 and evts[i + 1][4] == dedouble
                 and evts[i + 1][5] == regroupe):
@@ -1160,8 +1169,13 @@ def _show_detail(classe: str, course_key: str):
 
     seq_n = 0
     dedo_pending = False
+    prev_monday = None
 
     for start, end, dur, past, dedouble, regroupe in evts:
+        monday = start.date() - datetime.timedelta(days=start.weekday())
+        week_str = monday.strftime("%d/%m") if monday != prev_monday else ""
+        prev_monday = monday
+
         day      = _JOURS[start.weekday()]
         date_str = f"{day}. {start.strftime('%d/%m/%Y')}"
         # faux_positif = dedouble and not regroupe and nb_dedouble <= 2
@@ -1199,7 +1213,7 @@ def _show_detail(classe: str, course_key: str):
         _, warn = eleve_hours(dur)
         if warn:
             statut += " /!\\"
-        print(_DET_FMT.format(num_label, date_str, time_rng, statut, flag))
+        print(_DET_FMT.format(num_label, week_str, date_str, time_rng, statut, flag))
 
         if past:
             ep += eh; fp += fh; dp += dc; rp += rc
@@ -1946,11 +1960,13 @@ def run_menu_annual_analysis():
 def run_menu_repartition():
     """Option 9 : 1 ligne par classe/matière, 1 colonne par semaine.
     '.' = 0 cours cette semaine, 'x' = semaine de vacances (vacances.json,
-    par année scolaire), '●' = 1 cours, '■' orange = 2 cours, '■' rouge =
+    par année scolaire), 'o' = 1 cours, '■' orange = 2 cours, '■' rouge =
     3 cours ou plus. Pas de bordures (tableau trop large sinon).
     N'affiche pas le tableau complet à l'entrée : passe directement à la
     boucle de filtre (0=retour, 'T'=tout afficher, 'C texte'=classes,
-    'M texte'=matières, 'VF'=vue Formateur, 'VE'=vue Élèves).
+    'M texte'=matières, 'VF'=vue Formateur, 'VE'=vue Élèves, 'D xx'=détail
+    de la ligne xx du dernier tableau affiché — chaque tableau (T/C/M)
+    renumérote ses lignes à partir de 1).
     Vue Formateur (par défaut) : chaque créneau assuré compte. Vue Élèves :
     les séances dédoublées d'une même classe/matière/semaine ne comptent
     qu'une fois, même réparties sur plusieurs jours (un élève n'assiste
@@ -2023,9 +2039,10 @@ def run_menu_repartition():
             header_chars[start_pos + j] = ch
     header_row = "".join(header_chars)
 
+    _REP_NUM_W = 3   # largeur colonne N° (pour la commande D xx)
     _REP_CL_W = 14   # largeur colonne CLASSE
     _REP_CO_W = 30   # largeur colonne MATIERE
-    _REP_PREFIX = f"  {'Classe':<{_REP_CL_W}}  {'Matière':<{_REP_CO_W}}    "
+    _REP_PREFIX = f"  {'#':>{_REP_NUM_W}}  {'Classe':<{_REP_CL_W}}  {'Matière':<{_REP_CO_W}}    "
 
     vue = "F"   # "F" = vue Formateur, "E" = vue Élève — on débute en vue Formateur
 
@@ -2085,7 +2102,7 @@ def run_menu_repartition():
         line_count  = 0
         grand_total = 0
         grand_prevu = 0.0
-        for classe, ck in rows:
+        for i, (classe, ck) in enumerate(rows, 1):
             if prev_classe is not None and classe != prev_classe:
                 print()
                 line_count += 1
@@ -2101,19 +2118,19 @@ def run_menu_repartition():
             prevu       = _obj_blocks(classe, ck)
 
             row_chars = [" "] * row_len
-            for i, c in enumerate(week_counts):
+            for wi, c in enumerate(week_counts):
                 if c == 0:
-                    row_chars[week_pos[i]] = _dim("x") if week_is_vac[i] else _dim(".")
+                    row_chars[week_pos[wi]] = _dim("x") if week_is_vac[wi] else _dim(".")
                 elif c == 1:
-                    row_chars[week_pos[i]] = _green("●")
+                    row_chars[week_pos[wi]] = _green("o")
                 elif c == 2:
-                    row_chars[week_pos[i]] = _orange("■")
+                    row_chars[week_pos[wi]] = _orange("■")
                 else:
-                    row_chars[week_pos[i]] = _true_red("■")
+                    row_chars[week_pos[wi]] = _true_red("■")
             row      = "".join(row_chars)
             tot_str  = f"{total}/{int(prevu)}"
 
-            print(f"  {cl_lbl:<{_REP_CL_W}}  {co_lbl:<{_REP_CO_W}}    {row}  {tot_str:>{_REP_TOT_W}}")
+            print(f"  {i:>{_REP_NUM_W}}  {cl_lbl:<{_REP_CL_W}}  {co_lbl:<{_REP_CO_W}}    {row}  {tot_str:>{_REP_TOT_W}}")
             grand_total += total
             grand_prevu += prevu
             line_count += 1
@@ -2124,17 +2141,20 @@ def run_menu_repartition():
 
         gt_str = f"{grand_total}/{int(grand_prevu)}"
         print()
-        print(_bold(f"  {'GRAND TOTAL':<{_REP_CL_W}}  {'':<{_REP_CO_W}}    {' ' * row_len}  {gt_str:>{_REP_TOT_W}}"))
+        print(_bold(f"  {'':>{_REP_NUM_W}}  {'GRAND TOTAL':<{_REP_CL_W}}  {'':<{_REP_CO_W}}    {' ' * row_len}  {gt_str:>{_REP_TOT_W}}"))
 
     cn, sy = _current_cn_sy()
     _print_green_header(cn, sy or _selected_sy)
     print()
     print(_bold(f"  Répartition des cours sur l'année {_selected_sy}"))
 
+    last_rows_shown: List[Tuple[str, str]] = []
+
     while True:
         v_lbl = "VE=Passage en Vue Élèves" if vue == "F" else "VF=Passage en Vue Formateur"
+        d_lbl = ", 'D xx'=détail ligne xx" if last_rows_shown else ""
         cmd = input(f"\n  Action (0=retour au menu, T=tout afficher, 'C texte'=classes, "
-                     f"'M texte'=matières, {v_lbl}) : ").strip()
+                     f"'M texte'=matières, {v_lbl}{d_lbl}) : ").strip()
         if cmd == "0" or not cmd:
             break
         if cmd.upper() in ("VF", "VE"):
@@ -2155,15 +2175,30 @@ def run_menu_repartition():
                     fil, mod, nom = ck.split("|", 2)
                     if needle in normalize_for_match(course_label_short(mod, nom)):
                         rows.append((cl, ck))
+            elif len(parts) == 2 and parts[0].upper() == "D":
+                if not last_rows_shown:
+                    print("  Aucun tableau affiché pour l'instant. Utilisez d'abord 'T', 'C <texte>' ou 'M <texte>'.")
+                    continue
+                if not parts[1].strip().isdigit():
+                    print("  Numéro invalide. Utilisez 'D <numéro>' (numéro affiché dans le dernier tableau).")
+                    continue
+                idx = int(parts[1].strip()) - 1
+                if 0 <= idx < len(last_rows_shown):
+                    _show_detail(*last_rows_shown[idx])
+                    input("\n  Appuyez sur Entrée pour continuer...")
+                else:
+                    print("  Numéro invalide. Utilisez le numéro affiché dans le dernier tableau.")
+                continue
             else:
-                print("  Commande invalide. Utilisez '0', 'T', 'C <texte>', 'M <texte>', 'VF' ou 'VE'.")
+                print("  Commande invalide. Utilisez '0', 'T', 'C <texte>', 'M <texte>', 'VF', 'VE' ou 'D <numéro>'.")
                 continue
 
+        last_rows_shown = rows
         print()
         if not rows:
             print("  Aucun résultat pour ce filtre.")
         else:
-            print(f"  ('{_dim('.')}'=0 cours, '{_dim('x')}'=vacances, '{_green('●')}'=1 cours, '{_orange('■')}'=2 cours, '{_true_red('■')}'=3 cours ou plus — {nb_weeks} semaines à partir du {_fd(first_monday.isoformat())})")
+            print(f"  ('{_dim('.')}'=0 cours, '{_dim('x')}'=vacances, '{_green('o')}'=1 cours, '{_orange('■')}'=2 cours, '{_true_red('■')}'=3 cours ou plus — {nb_weeks} semaines à partir du {_fd(first_monday.isoformat())})")
             _print_table(rows)
 
 
