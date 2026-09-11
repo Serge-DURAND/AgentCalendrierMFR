@@ -196,6 +196,20 @@
 #           dès qu'une panne réseau est détectée, avec une seule ligne résumé
 #           ("Réseau indisponible, cycle ignoré (N calendriers).") au lieu
 #           d'un ERROR+WARNING répété pour chaque calendrier
+#
+# v6.4.3: Réconciliation par contenu (Étape 3bis) dans la boucle de vérification :
+#         un ajout et une suppression qui partagent le même résumé/lieu/date/heure
+#         (mais un UID différent — typiquement iMFR qui régénère un nouvel UID
+#         quand le partenaire d'un dédoublement change) sont désormais reclassés
+#         en Modification au lieu d'apparaître comme Ajout + Suppression séparés.
+#         Reclassement uniquement si le cas est non ambigu (exactement 1 ajout
+#         pour 1 suppression sur cette clé de contenu).
+#
+# v6.4.4: Console : le bandeau "--- Analyse des calendriers ---" ne s'affiche
+#         plus systématiquement en tête de cycle, mais juste avant la boucle de
+#         vérification (son 1er calendrier). Nouveau bandeau dédié
+#         "--- Envoi des mails récapitulatifs quotidiens ---" juste avant la
+#         boucle des rappels quotidiens, uniquement quand elle s'exécute.
 # =====================================================================
 
 import os
@@ -221,7 +235,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from icalendar import Calendar
 
-VERSION = "6.4.2"
+VERSION = "6.4.4"
 
 JOURS = ["Lun.", "Mar.", "Mer.", "Jeu.", "Ven.", "Sam.", "Dim."]
 
@@ -279,7 +293,11 @@ class ColorTimeFormatter(logging.Formatter):
         return f"{Fore.LIGHTBLACK_EX}{timestamp}{Style.RESET_ALL}"
 
     def format(self, record):
-        prefix = f"{self.formatTime(record, self.datefmt)} " if getattr(record, "show_time", True) else ""
+        if getattr(record, "show_time", True):
+            prefix = f"{self.formatTime(record, self.datefmt)} "
+        else:
+            plain_timestamp = logging.Formatter.formatTime(self, record, self.datefmt)
+            prefix = " " * (len(plain_timestamp) + 1)
         message = record.getMessage()
         if record.exc_info:
             message += "\n" + self.formatException(record.exc_info)
@@ -761,7 +779,7 @@ def send_daily_reminder(cal_id: str, events: Dict[str, Dict[str, Any]], to_addr:
             html_body += f'<li style="margin-top: 12px;">{format_event_line(ev, show_date=False)}</li>'
         html_body += "</ul><p>Bonne journée !</p>"
     send_email(to_addr, "Votre journée", html_body)
-    log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}  {Fore.GREEN}mail envoyé{Style.RESET_ALL}")
+    log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}  {Fore.GREEN}mail envoyé{Style.RESET_ALL}", show_time=False)
 
 
 # =====================================================================
@@ -1104,31 +1122,32 @@ def main() -> None:
 
     while True:
         print()
-        log_info(f"{Fore.LIGHTBLACK_EX}   --- Analyse des calendriers ---{Style.RESET_ALL}")
 
         # --- Rappels quotidiens ---
         if should_send_daily_reminder():
+            log_info(f"{Fore.LIGHTBLACK_EX}--- Envoi des mails récapitulatifs quotidiens ---{Style.RESET_ALL}")
             for cal_cfg in CALENDARS:
                 cal_id = cal_cfg.get("name", "Inconnu")
                 new_events, success, _ = fetch_events(cal_cfg.get("url"))
                 if not success:
                     continue
                 if not cal_cfg.get("send_daily_reminder", False):
-                    log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}  {Fore.GREEN}mail non envoyé (désactivé){Style.RESET_ALL}")
+                    log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}  {Fore.GREEN}mail non envoyé (désactivé){Style.RESET_ALL}", show_time=False)
                     continue
                 if cal_cfg.get("email"):
                     send_daily_reminder(cal_id, new_events, cal_cfg["email"])
 
         # --- Vérification des calendriers ---
+        log_info(f"{Fore.LIGHTBLACK_EX}--- Analyse des calendriers ---{Style.RESET_ALL}")
         for i, cal_cfg in enumerate(CALENDARS):
             cal_id = cal_cfg.get("name", "Inconnu")
             new_events, success, network_error = fetch_events(cal_cfg.get("url"))
             if not success:
                 if network_error:
                     skipped = len(CALENDARS) - i
-                    log_warning(f"Réseau indisponible, cycle ignoré ({pluriel(skipped, 'calendrier')}).")
+                    log_warning(f"Réseau indisponible, cycle ignoré ({pluriel(skipped, 'calendrier')}).", show_time=False)
                     break
-                log_warning(f"Calendrier {cal_id} inaccessible, vérification ignorée.")
+                log_warning(f"Calendrier {cal_id} inaccessible, vérification ignorée.", show_time=False)
                 continue
 
             # --- Notifications toast (propriétaire uniquement) ---
@@ -1186,6 +1205,42 @@ def main() -> None:
             added = [ev for ev in added_initial   if ev["uid"] not in reclassified_uids]
             real_removed = [ev for ev in apparent_removed if ev["uid"] not in reclassified_uids]
 
+            # Étape 3bis : réconciliation par contenu — un ajout et une suppression
+            # restants qui partagent le même résumé/lieu/date/heure (mais un UID
+            # différent) sont fonctionnellement le même créneau pour l'utilisateur
+            # (typiquement : iMFR régénère un nouvel UID quand le partenaire d'un
+            # dédoublement change). Reclassé en modification, cas non ambigu
+            # uniquement (exactement 1 pour 1 sur cette clé de contenu).
+            def _content_key(ev):
+                return (
+                    ev["summary"], ev.get("location", ""),
+                    ensure_datetime(ev["start_dt"]).isoformat(),
+                    ensure_datetime(ev["end_dt"]).isoformat(),
+                )
+
+            added_by_content   = {}
+            for ev in added:
+                added_by_content.setdefault(_content_key(ev), []).append(ev)
+
+            removed_by_content = {}
+            for ev in real_removed:
+                removed_by_content.setdefault(_content_key(ev), []).append(ev)
+
+            reclassified_content_uids = set()
+            for content_key in list(added_by_content.keys()):
+                if content_key in removed_by_content:
+                    if len(added_by_content[content_key]) == 1 and len(removed_by_content[content_key]) == 1:
+                        ev_new_c = added_by_content[content_key][0]
+                        ev_old_c = removed_by_content[content_key][0]
+                        changes  = detect_field_changes(ev_new_c, ev_old_c)
+                        if changes:
+                            modified.append((ev_new_c, ev_old_c, changes))
+                        reclassified_content_uids.add(ev_new_c["uid"])
+                        reclassified_content_uids.add(ev_old_c["uid"])
+
+            added        = [ev for ev in added        if ev["uid"] not in reclassified_content_uids]
+            real_removed = [ev for ev in real_removed  if ev["uid"] not in reclassified_content_uids]
+
             # Étape 4 : classification futur/passé et logging des vraies suppressions
             removed_future = []
             removed_past   = []
@@ -1208,13 +1263,13 @@ def main() -> None:
             total_changes = len(added) + len(modified) + len(removed_future) + len(removed_past)
 
             if not first_run and total_changes > 0:
-                log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}")
+                log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}", show_time=False)
                 html_msg = f'<h2 style="color: #404040;">{cal_id} — Résumé des modifications</h2>'
                 for sing, plur, evts in sections:
                     if not evts:
                         continue
                     count_str = pluriel(len(evts), sing, plur)
-                    log_info(f"  - {Fore.LIGHTGREEN_EX}{count_str}{Style.RESET_ALL}")
+                    log_info(f"  - {Fore.LIGHTGREEN_EX}{count_str}{Style.RESET_ALL}", show_time=False)
                     html_msg += f'<h3 style="color: #00008B; margin-bottom: 0;">{count_str}</h3><ul style="margin-top: 0;">'
                     for ev in evts:
                         if sing == "Modification":
@@ -1239,11 +1294,12 @@ def main() -> None:
                 if not mail_ok:
                     log_warning(
                         f"Mail non envoyé pour {cal_id} — état non mis à jour, "
-                        "les changements seront renvoyés au prochain cycle."
+                        "les changements seront renvoyés au prochain cycle.",
+                        show_time=False,
                     )
                     continue
             else:
-                log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}  {Fore.GREEN}pas de changement détecté{Style.RESET_ALL}")
+                log_info(f"{Fore.CYAN}{cal_id}{Style.RESET_ALL}  {Fore.GREEN}pas de changement détecté{Style.RESET_ALL}", show_time=False)
 
             previous_state[cal_id] = new_events
 
@@ -1254,12 +1310,12 @@ def main() -> None:
         rotate_logs()
 
         if first_run:
-            log_info(">>> Première exécution terminée : aucune notification envoyée <<<")
+            log_info(">>> Première exécution terminée : aucune notification envoyée <<<", show_time=False)
             first_run = False
 
         minutes     = CHECK_INTERVAL / 60
         minutes_str = f"{minutes:.1f}" if minutes % 1 else f"{int(minutes)}"
-        log_info(f"{Fore.LIGHTBLACK_EX}   --- Terminé, prochaine vérification dans {minutes_str} minutes ---{Style.RESET_ALL}")
+        log_info(f"{Fore.LIGHTBLACK_EX}--- Terminé, prochaine vérification dans {minutes_str} minutes ---{Style.RESET_ALL}")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
